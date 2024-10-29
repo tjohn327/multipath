@@ -247,16 +247,15 @@ to the notion of "network path" used in {{QUIC-TRANSPORT}}.
 
 # Handshake Negotiation and Transport Parameter {#nego}
 
-This extension defines a new transport parameter, used to negotiate
-the use of the multipath extension during the connection handshake,
-as specified in {{QUIC-TRANSPORT}}. The new transport parameter is
-defined as follows:
+This extension defines two new transport parameters, used to negotiate the use of the multipath extension and deadline-aware streams during the connection handshake, as specified in {{QUIC-TRANSPORT}}. The new transport parameters are defined as follows:
 
 - initial_max_path_id (current version uses 0x0f739bbc1b666d11): a
   variable-length integer specifying the maximum path identifier
   an endpoint is willing to maintain at connection initiation.
   This value MUST NOT exceed 2^32-1, the maximum allowed value for the Path ID due to
   restrictions on the nonce calculation (see {{multipath-aead}}).
+  
+- enable_deadline_aware_streams (value TBD): A zero-length value that, if present, indicates that the endpoint supports deadline-aware streams.
 
 For example, if initial_max_path_id is set to 1, only connection IDs
 associated with Path IDs 0 and 1 should be issued by the peer.
@@ -271,6 +270,8 @@ Setting initial_max_path_id parameter is equivalent to sending a
 MAX_PATH_ID frame ({{max-paths-frame}}) with the same value.
 As such to allow for the use of more paths later,
 endpoints can send the MAX_PATH_ID frame to increase the maximum allowed path identifier.
+
+Endpoints negotiate the use of deadline-aware streams by including the enable_deadline_aware_streams transport parameter in the handshake. Both endpoints MUST include this transport parameter to enable the use of deadline-aware streams. If an endpoint receives a DEADLINE_CONTROL frame without having negotiated support, it MUST treat this as a connection error of type PROTOCOL_VIOLATION
 
 If either of the endpoints does not advertise the initial_max_path_id transport
 parameter, then the endpoints MUST NOT use any frame or
@@ -721,6 +722,30 @@ The peer that sends the PATH_RETIRE_CONNECTION_ID frame can keep sending data
 on the path that the retired connection ID was used on but has
 to use a different connection ID for the same Path ID when doing so.
 
+# Deadline-Aware Streams {#deadline-aware-streams}
+
+Deadline-aware streams allow applications to specify deadlines for data transmission on specific streams. This enables the transport layer to make scheduling and retransmission decisions that aim to meet these deadlines, optimizing for latency-sensitive applications.
+
+## Signaling Deadlines
+
+To signal deadlines, endpoints use the DEADLINE_CONTROL frame (see {{deadline-control-frame}}). This frame associates a specific deadline with a stream, indicating the relative time by which the data should be delivered.
+
+## Deadline Semantics
+
+- Deadline Representation: Deadlines are represented as a relative time in milliseconds from the time the frame is sent.
+- Stream Association: A deadline applies to a specific stream identified by its Stream ID
+- Transport Behavior: Upon receiving a DEADLINE_CONTROL frame, the transport layer SHOULD attempt to schedule and retransmit packets carrying data for the specified stream to meet the indicated deadline.
+- Retransmissions and Scheduling: Endpoints MAY implement custom schedulers and congestion controllers optimized for deadline-aware traffic, such as those based on DMTP concepts.
+
+## Handling Missed Deadline
+
+If the transport layer determines that the deadline cannot be met, it MAY choose to:
+
+- Discard the data associated with the deadline-aware stream.
+- Inform the application of the missed deadline.
+- Continue delivering the data if it is still deemed useful.
+
+The specific behavior is implementation-specific and MAY be configurable by the application.
 
 # Packet Protection {#multipath-aead}
 
@@ -1067,6 +1092,16 @@ adopt a simple coordination rule, such as only letting the client
 initiate closure of duplicate paths, or perhaps relying on
 the application protocol to decide which paths should be closed.
 
+## Custom Scheduler and Congestion Controller for Deadline-Aware Streams
+
+Implementations that support deadline-aware streams SHOULD provide a custom scheduler and congestion controller that prioritize packets based on their deadlines. This includes:
+
+- Path Selection: Dynamically selecting paths that are most likely to meet the deadlines based on real-time metrics like latency, bandwidth, and packet loss.
+- Packet Prioritization: Prioritizing packets from streams with earlier deadlines.
+- Adaptive Retransmissions: Deciding whether to retransmit lost packets based on their remaining time before the deadline.
+- Forward Error Correction (FEC): Optionally integrating FEC mechanisms to reduce the need for retransmissions in networks with random losses.
+- Deadline Miss Handling: Informing the application when a deadline cannot be met, allowing it to take appropriate action.
+
 
 # New Frames {#frames}
 
@@ -1367,6 +1402,33 @@ Maximum Path Identifier:
   Receipt of a value that is higher than the local maximum value MUST
   be treated as a connection error of type PROTOCOL_VIOLATION.
 
+## DEADLINE_CONTROL Frame {#deadline-control-frame}
+
+The DEADLINE_CONTROL frame (type=TBD) is used to signal deadline-awareness for specific streams and to indicate their associated deadlines.
+
+~~~
+  DEADLINE_CONTROL Frame {
+    Type (i) = TBD,
+    Stream ID (i),
+    Deadline (i),
+  }
+~~~
+
+The DEADLINE_CONTROL frame contains the following fields:
+
+Stream ID:
+: A variable-length integer indicating the Stream ID to which the deadline applies.
+
+Deadline:
+: A variable-length integer representing the relative deadline in milliseconds from the time the frame is sent.
+
+An endpoint sends a DEADLINE_CONTROL frame to indicate that data on the specified stream should be delivered by the given deadline. Upon receiving this frame, the peer MUST attempt to schedule and deliver the data on the specified stream within the indicated deadline.
+
+Usage Constraints:
+- Endpoints MUST NOT send the DEADLINE_CONTROL frame unless both endpoints have negotiated support via the enable_deadline_aware_streams transport parameter.
+- If an endpoint receives a DEADLINE_CONTROL frame without having negotiated support, it MUST treat it as a connection error of type PROTOCOL_VIOLATION.
+- The DEADLINE_CONTROL frame MUST only be sent in 1-RTT packets.
+
 # Error Codes {#error-codes}
 
 QUIC transport error codes are 62-bit unsigned integers
@@ -1386,9 +1448,9 @@ resource constraints prevent the continuation of the path.
 
 # IANA Considerations
 
-This document defines a new transport parameter for the negotiation of
-enable multiple paths for QUIC, and three new frame types. The draft defines
-provisional values for experiments, but we expect IANA to allocate
+This document defines two new transport parameters for the negotiation of
+enable multiple paths for QUIC and deadline-aware streams, and four new frame types.
+The draft defines provisional values for experiments, but we expect IANA to allocate
 short values if the draft is approved.
 
 The following entry in {{transport-parameters}} should be added to
@@ -1397,6 +1459,7 @@ the "QUIC Transport Parameters" registry under the "QUIC Protocol" heading.
 Value                                         | Parameter Name.   | Specification
 ----------------------------------------------|-------------------|-----------------
 TBD (current version uses 0x0f739bbc1b666d11) | initial_max_path_id | {{nego}}
+TBD                                           | enable_deadline_aware_streams  | {{nego}}
 {: #transport-parameters title="Addition to QUIC Transport Parameters Entries"}
 
 
@@ -1414,6 +1477,7 @@ TBD-05 (experiments use 0x15228c09)                  | PATH_NEW_CONNECTION_ID   
 TBD-06 (experiments use 0x15228c0a)                  | PATH_RETIRE_CONNECTION_ID| {{mp-retire-conn-id-frame}}
 TBD-07 (experiments use 0x15228c0c)                  | MAX_PATH_ID            | {{max-paths-frame}}
 TBD-08 (experiments use 0x15228c0d)                  | PATHS_BLOCKED    | {{paths-blocked-frame}}
+TBD                                                  | DEADLINE_CONTROL | {{deadline-control-frame}}
 {: #frame-types title="Addition to QUIC Frame Types Entries"}
 
 The following transport error code defined in {{tab-error-code}} are to
